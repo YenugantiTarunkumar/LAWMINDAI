@@ -1,4 +1,5 @@
 import mammoth from 'mammoth';
+import { CanvasFactory } from 'pdf-parse/worker';
 import { PDFParse } from 'pdf-parse';
 
 export const MAX_DOCUMENT_FILE_SIZE = 5 * 1024 * 1024;
@@ -81,7 +82,10 @@ async function parsePdf(
   bytes: Buffer,
   fileName: string,
 ): Promise<ExtractedDocument> {
-  const parser = new PDFParse({ data: bytes });
+  const parser = new PDFParse({
+    data: bytes,
+    CanvasFactory,
+  });
 
   try {
     const result = await parser.getText();
