@@ -1,6 +1,7 @@
 import { generateText } from 'ai';
 import { NextRequest, NextResponse } from 'next/server';
-import { getModel } from '@/lib/ai/provider';
+import { getModel, GEMINI_MODEL } from '@/lib/ai/provider';
+import { logSafeDiagnostic } from '@/lib/ai/diagnostic-logger';
 import { retrieveDocumentPassages, type DocumentPassage } from '@/lib/chat/retrieval';
 import { parseChatResponse } from '@/lib/chat/response-parser';
 import { isValidReviewId } from '@/lib/storage/review-store';
@@ -238,19 +239,82 @@ export async function POST(request: NextRequest) {
       system: getSystemPrompt(),
       prompt,
     });
+
+    if (!generation.text || !generation.text.trim()) {
+      logSafeDiagnostic({
+        event: 'chat_empty_generation',
+        model: GEMINI_MODEL,
+        finishReason: generation.finishReason,
+      });
+      return NextResponse.json(
+        { error: 'The AI service returned an empty answer. Please retry.' },
+        { status: 502 },
+      );
+    }
+
     const response = parseChatResponse(generation.text, passages);
     if (!response) {
+      logSafeDiagnostic({
+        event: 'chat_parse_failure',
+        model: GEMINI_MODEL,
+        finishReason: generation.finishReason,
+      });
       return NextResponse.json(
-        { error: 'The AI service returned an invalid answer. Please retry.' },
+        { error: 'The AI service returned an unreadable answer. Please retry.' },
         { status: 502 },
       );
     }
     return NextResponse.json(response);
   } catch (error) {
-    console.error(
-      'Document chat AI service request failed:',
-      error instanceof Error ? error.name : 'Unknown error',
-    );
+    const errorName = error instanceof Error ? error.name : 'UnknownError';
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const lowerMsg = errorMessage.toLowerCase();
+
+    logSafeDiagnostic({
+      event: 'chat_provider_error',
+      model: GEMINI_MODEL,
+      errorType: errorName,
+      errorMessage,
+    });
+
+    // Rate limit / Quota exceeded
+    if (
+      lowerMsg.includes('429') ||
+      lowerMsg.includes('quota') ||
+      lowerMsg.includes('resource_exhausted') ||
+      lowerMsg.includes('rate limit')
+    ) {
+      return NextResponse.json(
+        { error: 'The AI service is currently receiving too many requests. Please wait a moment and try again.' },
+        { status: 429 },
+      );
+    }
+
+    // Provider Timeout
+    if (
+      lowerMsg.includes('timeout') ||
+      lowerMsg.includes('deadline') ||
+      lowerMsg.includes('aborterror') ||
+      lowerMsg.includes('etimedout')
+    ) {
+      return NextResponse.json(
+        { error: 'The AI service timed out while processing your question. Please try again.' },
+        { status: 504 },
+      );
+    }
+
+    // Service unavailable / Overloaded
+    if (
+      lowerMsg.includes('503') ||
+      lowerMsg.includes('unavailable') ||
+      lowerMsg.includes('overloaded')
+    ) {
+      return NextResponse.json(
+        { error: 'The AI service is temporarily unavailable. Please try again in a few moments.' },
+        { status: 503 },
+      );
+    }
+
     return NextResponse.json(
       { error: 'The AI service could not answer this question. Please try again later.' },
       { status: 502 },
